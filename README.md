@@ -60,8 +60,14 @@ We recommend running our code using:
 
 To install our implementation, clone our repository and run following commands to install necessary packages:
   ```shell script
-conda install --yes -c pytorch pytorch=1.7.1 torchvision cudatoolkit=<CUDA_VERSION>
+
+# Download pytorch through https://pytorch.org/ with cuda version (4090 needs 12)
+# conda install --yes -c pytorch pytorch=1.7.1 torchvision cudatoolkit=<CUDA_VERSION>
 pip install -r requirements.txt
+# if not working, then:
+# $git clone git@github.com:openai/CLIP.git
+# $cd CLIP
+# $pip install .
 pip install git+https://github.com/openai/CLIP.git
 ```
 ### Resources
