@@ -1,4 +1,5 @@
 run*/*
 *data*
 *pretrained*
+*precomputed*
 *__pycache__*

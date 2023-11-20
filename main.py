@@ -21,6 +21,7 @@ def parse_args_and_config():
     parser.add_argument('--unseen2unseen', action='store_true')
     parser.add_argument('--clip_finetune_eff', action='store_true')
     parser.add_argument('--edit_one_image_eff', action='store_true')
+    parser.add_argument('--compare_diff', action='store_true') # ninwang
 
     # Default
     parser.add_argument('--config', type=str, required=True, help='Path to the config file')
@@ -59,6 +60,7 @@ def parse_args_and_config():
     parser.add_argument('--deterministic_inv', type=int, default=1, help='Whether to use deterministic inversion during inference')
     parser.add_argument('--hybrid_noise', type=int, default=0, help='Whether to change multiple attributes by mixing multiple models')
     parser.add_argument('--model_ratio', type=float, default=1, help='Degree of change, noise ratio from original and finetuned model.')
+    parser.add_argument('--folder_path', type=str, default=None, help='ninwang: Folder that stores comparing images, must includes B/A subfolders.')
 
 
     # Loss & Optimization
@@ -128,10 +130,14 @@ def parse_args_and_config():
         else:
             args.exp = args.exp + f'_U2U_{new_config.data.category}_{args.img_path.split("/")[-1].split(".")[0]}_t{args.t_0}_ninv{args.n_train_step}_ngen{args.n_train_step}_orig'
 
+    elif args.compare_diff:
+        args.exp = args.exp + f'_CD_{new_config.data.category}_{args.folder_path.split("/")[-1]}_t{args.t_0}_ninv{args.n_train_step}_orig'
+
     elif args.recon_exp:
         args.exp = args.exp + f'_REC_{new_config.data.category}_{args.img_path.split("/")[-1].split(".")[0]}_t{args.t_0}_ninv{args.n_train_step}'
     elif args.find_best_image:
         args.exp = args.exp + f'_FOpt_{new_config.data.category}_{args.trg_txts[0]}_t{args.t_0}_ninv{args.n_train_step}'
+
 
 
     level = getattr(logging, args.verbose.upper(), None)
@@ -221,6 +227,8 @@ def main():
             runner.edit_one_image_eff()
         elif args.unseen2unseen:
             runner.unseen2unseen()
+        elif args.compare_diff:
+            runner.clip_compare_diff()
         else:
             print('Choose one mode!')
             raise ValueError

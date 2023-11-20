@@ -1199,3 +1199,193 @@ class DiffusionCLIP(object):
 
             tvu.save_image((x + 1) * 0.5, os.path.join(self.args.image_folder,
                                                        f'4_gen_t{self.args.t_0}_ninv{self.args.n_inv_step}_ngen{self.args.n_test_step}_mrat{self.args.model_ratio}.png'))
+    
+    
+    
+    # 2023/11/20 ninwang
+    def clip_compare_diff(self):
+        # ----------- Model -----------#
+        if self.config.data.dataset in ["IMAGENET"]:
+            model = i_DDPM(self.config.data.dataset)
+            init_ckpt = torch.load(MODEL_PATHS[self.config.data.dataset])
+            learn_sigma = True
+            print("Improved diffusion Model loaded.")
+        else:
+            print('Not implemented dataset')
+            raise ValueError
+        model.load_state_dict(init_ckpt)
+        model.to(self.device)
+        model = torch.nn.DataParallel(model)
+        model.eval()
+        print(f"{MODEL_PATHS[self.config.data.dataset]} is loaded.")
+
+        n = self.args.bs_test
+        # Reverse process steps
+        seq_inv = np.linspace(0, 1, self.args.n_inv_step) * self.args.t_0
+        seq_inv = [int(s) for s in list(seq_inv)]
+        seq_inv_next = [-1] + list(seq_inv[:-1])
+        # Forward process steps
+        print(f"Sampling type: {self.args.sample_type.upper()} with eta {self.args.eta}, "
+                f" Steps: {self.args.n_test_step}/{self.args.t_0}")
+        if self.args.n_test_step != 0:
+            seq_test = np.linspace(0, 1, self.args.n_test_step) * self.args.t_0
+            seq_test = [int(s) for s in list(seq_test)]
+            print('Uniform skip type')
+        else:
+            seq_test = list(range(self.args.t_0))
+            print('No skip')
+        seq_test_next = [-1] + list(seq_test[:-1])
+        # Forward process steps after diff
+        seq_diff = np.linspace(0, 1, 5) * self.args.t_0
+        seq_diff = [int(s) for s in list(seq_diff)]
+        seq_diff_next = [-1] + list(seq_diff[:-1])
+
+        # ----------- Load/Compute Latents -----------#
+        # B: before images
+        # A: after images
+        img_lat_pairs_dic = {}
+        for mode in ['B', 'A']:
+            img_lat_pairs = []
+            pairs_path = os.path.join(f'precomputed/',
+                                      f'CD_{self.config.data.category}_{self.args.folder_path.split("/")[-1]}_{mode}_nit{self.args.n_iter}_t{self.args.t_0}_ninv{self.args.n_inv_step}_ngen{self.args.n_test_step}_pairs.pth')
+            print(f'Loading {pairs_path}')
+            # ----------- Load Latents -----------#
+            if os.path.exists(pairs_path):
+                print(f'{mode} pairs exists, start loading...')
+                img_lat_pairs_dic[mode] = torch.load(pairs_path)
+                for step, (x0, x_id, x_lat) in enumerate(img_lat_pairs_dic[mode]):
+                    tvu.save_image((x0 + 1) * 0.5, os.path.join(self.args.image_folder, f'{mode}_{step}_0orig_load.png'))
+                    tvu.save_image((x_id + 1) * 0.5, os.path.join(self.args.image_folder,
+                                                                  f'{mode}_{step}_1rec_nit{self.args.n_iter}_t{self.args.t_0}_ninv{self.args.n_inv_step}_ngen{self.args.n_test_step}.png'))
+                    if step == self.args.n_precomp_img - 1:
+                        break
+                continue
+
+            # ----------- Compute Latents -----------#
+            # load images
+            images = []
+            data_folder = os.path.join(f'{self.args.folder_path}/{mode}/')
+            print(f'{mode} pairs NOT exist, start computing from {data_folder}...')
+            for filename in os.listdir(data_folder):
+                file = os.path.join(data_folder, filename)
+                print(f'loading image file {file}')
+                img = Image.open(file).convert("L")
+                img = img.resize((512, 512))
+                img = img.resize((self.config.data.image_size, self.config.data.image_size), Image.ANTIALIAS)
+                img = img.convert("RGB")
+                img = np.array(img)/255
+                img = torch.from_numpy(img).type(torch.FloatTensor).permute(2, 0, 1).unsqueeze(dim=0).repeat(n, 1, 1, 1)
+                img = img.to(self.config.device)
+                images.append(img)
+            print(f'Loaded {len(images)} images')
+            if self.args.n_precomp_img > len(images):
+                self.args.n_precomp_img = len(images)
+
+            # x0:       original
+            # xt:       iterate x_{t}
+            # x:        iterate x_{t+1}
+            # x_lat:    final latent of x
+            for step, img in enumerate(images):
+                print(f"Processing {step}th img ...")
+                tvu.save_image(img, os.path.join(self.args.image_folder, f'{mode}_{step}_0orig.png'))
+                x0 = (img - 0.5) * 2. 
+                xt = x0
+                for it in range(self.args.n_iter):
+                    print(f"Iteration {it} ...")
+                    x_lat_path = os.path.join(self.args.image_folder, f'{mode}_{step}_it{it}_xlat_t{self.args.t_0}_ninv{self.args.n_inv_step}.pth')
+                    x = xt.clone()
+                    x_lat = xt.clone()
+                    #---------------- Invert Image to Latent in case of Deterministic Inversion process -------------------#
+                    # Reverse Process
+                    with torch.no_grad():
+                        with tqdm(total=len(seq_inv), desc=f"Inversion process m{mode} img{step} it{it}") as progress_bar:
+                            for it_inv, (i, j) in enumerate(zip((seq_inv_next[1:]), (seq_inv[1:]))):
+                                t = (torch.ones(n) * i).to(self.device)
+                                t_prev = (torch.ones(n) * j).to(self.device)
+
+                                x = denoising_step(x, t=t, t_next=t_prev, models=model,
+                                                logvars=self.logvar,
+                                                sampling_type='ddim',
+                                                b=self.betas,
+                                                eta=0,
+                                                learn_sigma=learn_sigma)
+
+                                progress_bar.update(1)
+                        x_lat = x.clone()
+                        # if it == self.args.n_precomp_img - 1:
+                        torch.save(x_lat, x_lat_path)
+                        tvu.save_image((x_lat + 1) * 0.5, os.path.join(self.args.image_folder,
+                                            f'{mode}_{step}_1lat_it{it}_t{self.args.t_0}_ninv{self.args.n_inv_step}.png'))
+        
+                        # ----------- Generative Process -----------#
+                        # Forward Process
+                        with tqdm(total=len(seq_test), desc=f"Generative process m{mode} img{step} it{it}") as progress_bar:
+                            for it_rev, (i, j) in enumerate(zip(reversed((seq_test)), reversed((seq_test_next)))):
+                                t = (torch.ones(n) * i).to(self.device)
+                                t_next = (torch.ones(n) * j).to(self.device)
+
+                                x = denoising_step(x, t=t, t_next=t_next, models=model,
+                                                            logvars=self.logvar,
+                                                            sampling_type=self.args.sample_type,
+                                                            b=self.betas,
+                                                            eta=self.args.eta,
+                                                            learn_sigma=learn_sigma,
+                                                            ratio=self.args.model_ratio,
+                                                            hybrid=self.args.hybrid_noise,
+                                                            hybrid_config=HYBRID_CONFIG)
+                                progress_bar.update(1)
+                        xt = x.clone()
+                        # if (it == self.args.n_precomp_img - 1)
+                        tvu.save_image((x + 1) * 0.5, os.path.join(self.args.image_folder,
+                                        f'{mode}_{step}_3gen_it{it}_t{self.args.t_0}_ninv{self.args.n_inv_step}_ngen{self.args.n_test_step}.png'))
+                    # end torch.no_grad()
+                # end for self.args.n_iter
+                
+                #  append each image: [orignal, x_{t+1}, x_latent]
+                img_lat_pairs.append([x0, x.detach().clone(), x_lat.detach().clone()])
+                if step == self.args.n_precomp_img - 1:
+                    break
+                # break # debug
+            # end for images
+            
+            # store precomputed latents
+            img_lat_pairs_dic[mode] = img_lat_pairs
+            torch.save(img_lat_pairs, pairs_path)
+            print(f'Saved {pairs_path}')
+            # break # debug
+        # end for mode in ['B', 'A']
+
+        # ----------- Compute Diff -----------#
+        print("Computing latent diff...")
+        for step, (Bx0, Bx_id, Bx_lat) in enumerate(img_lat_pairs_dic['B']):
+            print(f'Fetching A img{step}...')
+            (Ax0, Ax_id, Ax_lat) = img_lat_pairs_dic['A'][step]
+            # compute diff
+            x_lat_diff = Bx_lat - Ax_lat
+            tvu.save_image((x_lat_diff + 1) * 0.5, os.path.join(self.args.image_folder,
+                            f'diff{step}_1sub_it{self.args.n_iter}_t{self.args.t_0}_ninv{self.args.n_inv_step}_ngen{self.args.n_test_step}.png'))
+
+            # Forward Process
+            x = x_lat_diff.clone()
+            with tqdm(total=len(seq_diff), desc=f"Generative process diff_img{step}") as progress_bar:
+                for it_rev, (i, j) in enumerate(zip(reversed((seq_diff)), reversed((seq_diff_next)))):
+                    t = (torch.ones(n) * i).to(self.device)
+                    t_next = (torch.ones(n) * j).to(self.device)
+                    x = denoising_step(x, t=t, t_next=t_next, models=model,
+                                                logvars=self.logvar,
+                                                sampling_type=self.args.sample_type,
+                                                b=self.betas,
+                                                eta=self.args.eta,
+                                                learn_sigma=learn_sigma
+                                                # ratio=self.args.model_ratio,
+                                                # hybrid=self.args.hybrid_noise,
+                                                # hybrid_config=HYBRID_CONFIG
+                                                )
+                    progress_bar.update(1)
+            tvu.save_image((x + 1) * 0.5, os.path.join(self.args.image_folder,
+                            f'diff{step}_2gen_it{self.args.n_iter}_t{self.args.t_0}_ninv{self.args.n_inv_step}_ngen{self.args.n_test_step}.png'))
+            
+            
+            break
+
+ 
