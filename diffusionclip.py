@@ -1203,7 +1203,7 @@ class DiffusionCLIP(object):
     
     
     # 2023/11/20 ninwang
-    def clip_compare_diff(self):
+    def clip_compare_diff_pre(self):
         # ----------- Model -----------#
         if self.config.data.dataset in ["IMAGENET"]:
             model = i_DDPM(self.config.data.dataset)
@@ -1236,7 +1236,7 @@ class DiffusionCLIP(object):
             print('No skip')
         seq_test_next = [-1] + list(seq_test[:-1])
         # Forward process steps after diff
-        seq_diff = np.linspace(0, 1, 5) * self.args.t_0
+        seq_diff = np.linspace(0, 1, 40) * self.args.t_0
         seq_diff = [int(s) for s in list(seq_diff)]
         seq_diff_next = [-1] + list(seq_diff[:-1])
 
@@ -1355,37 +1355,156 @@ class DiffusionCLIP(object):
             # break # debug
         # end for mode in ['B', 'A']
 
+    def clip_compare_diff(self):
+        # ----------- Model -----------#
+        if self.config.data.dataset in ["IMAGENET"]:
+            model = i_DDPM(self.config.data.dataset)
+            init_ckpt = torch.load(MODEL_PATHS[self.config.data.dataset])
+            learn_sigma = True
+            print("Improved diffusion Model loaded.")
+        else:
+            print('Not implemented dataset')
+            raise ValueError
+        model.load_state_dict(init_ckpt)
+        model.to(self.device)
+        model = torch.nn.DataParallel(model)
+        model.eval()
+        print(f"{MODEL_PATHS[self.config.data.dataset]} is loaded.")
+
+        n = self.args.bs_test
+        # Reverse process steps
+        seq_inv = np.linspace(0, 1, self.args.n_inv_step) * self.args.t_0
+        seq_inv = [int(s) for s in list(seq_inv)]
+        seq_inv_next = [-1] + list(seq_inv[:-1])
+        # Forward process steps
+        print(f"Sampling type: {self.args.sample_type.upper()} with eta {self.args.eta}, "
+                f" Steps: {self.args.n_test_step}/{self.args.t_0}")
+        if self.args.n_test_step != 0:
+            seq_test = np.linspace(0, 1, self.args.n_test_step) * self.args.t_0
+            seq_test = [int(s) for s in list(seq_test)]
+            print('Uniform skip type')
+        else:
+            seq_test = list(range(self.args.t_0))
+            print('No skip')
+        seq_test_next = [-1] + list(seq_test[:-1])
+        # Forward process steps after diff
+        seq_diff = np.linspace(0, 1, 40) * self.args.t_0
+        seq_diff = [int(s) for s in list(seq_diff)]
+        seq_diff_next = [-1] + list(seq_diff[:-1])
+
         # ----------- Compute Diff -----------#
-        print("Computing latent diff...")
-        for step, (Bx0, Bx_id, Bx_lat) in enumerate(img_lat_pairs_dic['B']):
-            print(f'Fetching A img{step}...')
-            (Ax0, Ax_id, Ax_lat) = img_lat_pairs_dic['A'][step]
-            # compute diff
-            x_lat_diff = Bx_lat - Ax_lat
-            tvu.save_image((x_lat_diff + 1) * 0.5, os.path.join(self.args.image_folder,
-                            f'diff{step}_1sub_it{self.args.n_iter}_t{self.args.t_0}_ninv{self.args.n_inv_step}_ngen{self.args.n_test_step}.png'))
+        if self.args.diff_type == 'orig':
+            diff_folder = os.path.join(self.args.exp, 'diff_samples_orig_binary')
+        elif self.args.diff_type == 'xlat':
+            diff_folder = os.path.join(self.args.exp, 'diff_samples_xlat_binary')
+        elif self.args.diff_type == 'xid':
+            diff_folder = os.path.join(self.args.exp, 'diff_samples_xid_binary')
+        else:
+            print('Unkown Diff Type')
+            raise ValueError
+        if not os.path.exists(diff_folder):
+            os.makedirs(diff_folder)
 
-            # Forward Process
-            x = x_lat_diff.clone()
-            with tqdm(total=len(seq_diff), desc=f"Generative process diff_img{step}") as progress_bar:
-                for it_rev, (i, j) in enumerate(zip(reversed((seq_diff)), reversed((seq_diff_next)))):
-                    t = (torch.ones(n) * i).to(self.device)
-                    t_next = (torch.ones(n) * j).to(self.device)
-                    x = denoising_step(x, t=t, t_next=t_next, models=model,
-                                                logvars=self.logvar,
-                                                sampling_type=self.args.sample_type,
-                                                b=self.betas,
-                                                eta=self.args.eta,
-                                                learn_sigma=learn_sigma
-                                                # ratio=self.args.model_ratio,
-                                                # hybrid=self.args.hybrid_noise,
-                                                # hybrid_config=HYBRID_CONFIG
-                                                )
-                    progress_bar.update(1)
-            tvu.save_image((x + 1) * 0.5, os.path.join(self.args.image_folder,
-                            f'diff{step}_2gen_it{self.args.n_iter}_t{self.args.t_0}_ninv{self.args.n_inv_step}_ngen{self.args.n_test_step}.png'))
-            
-            
-            break
+        # for step, (Bx0, Bx_id, Bx_lat) in enumerate(img_lat_pairs_dic['B']):
+        for step in range(8):
+            # if step != 0:
+            #     continue
+            # step is the index of images
+            for it in range(self.args.n_iter):
+                if self.args.diff_type == 'orig':
+                    if it != 0:
+                        continue
+                    Bx_orig_path = os.path.join(self.args.image_folder, f'B_{step}_0orig.png')
+                    Ax_orig_path = os.path.join(self.args.image_folder, f'A_{step}_0orig.png')
+                    print(f'loaded Bx_orig at {Bx_orig_path}')
+                    print(f'loaded Ax_orig at {Ax_orig_path}')
+                    # ---
+                    Bx_orig =  Image.open(Bx_orig_path).convert("RGB")
+                    Bx_orig = np.array(Bx_orig)/255
+                    Bx_orig = torch.from_numpy(Bx_orig).type(torch.FloatTensor).permute(2, 0, 1).unsqueeze(dim=0).repeat(n, 1, 1, 1)
+                    Bx_orig = Bx_orig.to(self.config.device)
+                    Bx_orig = (Bx_orig - 0.5) * 2.
+                    # ---
+                    Ax_orig =  Image.open(Ax_orig_path).convert("RGB")
+                    Ax_orig = np.array(Ax_orig)/255
+                    Ax_orig = torch.from_numpy(Ax_orig).type(torch.FloatTensor).permute(2, 0, 1).unsqueeze(dim=0).repeat(n, 1, 1, 1)
+                    Ax_orig = Ax_orig.to(self.config.device)
+                    Ax_orig = (Ax_orig - 0.5) * 2.
+                    # --  
+                    x_lat_diff = Bx_orig - Ax_orig
+                    diff_path = os.path.join(diff_folder,
+                                f'diff{step}_{self.args.diff_type}_1sub_it{it}_t{self.args.t_0}_ninv{self.args.n_inv_step}_ngen{self.args.n_test_step}.png')
+                elif self.args.diff_type == 'xlat':
+                    Bx_lat_path = os.path.join(self.args.image_folder, f'B_{step}_it{it}_xlat_t{self.args.t_0}_ninv{self.args.n_inv_step}.pth')
+                    Ax_lat_path = os.path.join(self.args.image_folder, f'A_{step}_it{it}_xlat_t{self.args.t_0}_ninv{self.args.n_inv_step}.pth')
+                    Bx_lat = torch.load(Bx_lat_path)
+                    Ax_lat = torch.load(Ax_lat_path)
+                    print(f'loaded B latent at {Bx_lat_path}')
+                    print(f'loaded A latent at {Ax_lat_path}')
+                    # --  
+                    x_lat_diff = Bx_lat - Ax_lat
+                    diff_path = os.path.join(diff_folder,
+                                f'diff{step}_{self.args.diff_type}_1sub_it{it}_t{self.args.t_0}_ninv{self.args.n_inv_step}_ngen{self.args.n_test_step}.png')
+                elif self.args.diff_type == 'xid':
+                    Bx_id_path = os.path.join(self.args.image_folder,
+                                        f'B_{step}_3gen_it{it}_t{self.args.t_0}_ninv{self.args.n_inv_step}_ngen{self.args.n_test_step}.png')
+                    Ax_id_path = os.path.join(self.args.image_folder,
+                                            f'A_{step}_3gen_it{it}_t{self.args.t_0}_ninv{self.args.n_inv_step}_ngen{self.args.n_test_step}.png')
+                    print(f'loaded Bx_id at {Bx_id_path}')
+                    print(f'loaded Ax_id at {Ax_id_path}')
+                    # ---
+                    Bx_id =  Image.open(Bx_id_path).convert("RGB")
+                    Bx_id = np.array(Bx_id)/255
+                    Bx_id = torch.from_numpy(Bx_id).type(torch.FloatTensor).permute(2, 0, 1).unsqueeze(dim=0).repeat(n, 1, 1, 1)
+                    Bx_id = Bx_id.to(self.config.device)
+                    Bx_id = (Bx_id - 0.5) * 2.
+                    # ---
+                    Ax_id =  Image.open(Ax_id_path)
+                    Ax_id = np.array(Ax_id)/255
+                    Ax_id = torch.from_numpy(Ax_id).type(torch.FloatTensor).permute(2, 0, 1).unsqueeze(dim=0).repeat(n, 1, 1, 1)
+                    Ax_id = Ax_id.to(self.config.device)
+                    Ax_id = (Ax_id - 0.5) * 2.
+                    # --
+                    x_lat_diff = Bx_id - Ax_id
+                    diff_path = os.path.join(diff_folder,
+                                    f'diff{step}_{self.args.diff_type}_1sub_it{it}_t{self.args.t_0}_ninv{self.args.n_inv_step}_ngen{self.args.n_test_step}.png')
+                else:
+                    print('Unkown Diff Type')
+                    raise ValueError
 
- 
+                # --- binary
+                img = (x_lat_diff + 1) * 0.5
+                img[img<0.5]=0
+                img[img>0.5]=255
+                tvu.save_image(img, diff_path)
+                x_lat_diff = (img - 0.5) * 2
+
+                # Forward Process
+                if self.args.diff_is_forward:
+                    x = x_lat_diff.clone()
+                    with torch.no_grad():
+                        with tqdm(total=len(seq_diff), desc=f"Generative process diff_img{step} it{it}") as progress_bar:
+                            for it_rev, (i, j) in enumerate(zip(reversed((seq_diff)), reversed((seq_diff_next)))):
+                                t = (torch.ones(n) * i).to(self.device)
+                                t_next = (torch.ones(n) * j).to(self.device)
+                                x = denoising_step(x, t=t, t_next=t_next, models=model,
+                                                            logvars=self.logvar,
+                                                            sampling_type=self.args.sample_type,
+                                                            b=self.betas,
+                                                            eta=self.args.eta,
+                                                            learn_sigma=learn_sigma,
+                                                            ratio=self.args.model_ratio,
+                                                            hybrid=self.args.hybrid_noise,
+                                                            hybrid_config=HYBRID_CONFIG
+                                                            )
+                                progress_bar.update(1)
+
+                        # print(x)
+                        img = (x + 1) * 0.5
+                        # print(img.shape)
+                        img[img<0.5]=0
+                        img[img>0.5]=255
+                        # print(img.shape)
+                        tvu.save_image(img, os.path.join(diff_folder,
+                                        f'diff{step}_{self.args.diff_type}_2gen_it{it}_t{self.args.t_0}_ninv{self.args.n_inv_step}_ngen{self.args.n_test_step}.png'))
+                
