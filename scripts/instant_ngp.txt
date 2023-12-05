@@ -1,0 +1,1 @@
+python D:\ninwang\instant-ngp\scripts\colmap2nerf.py --colmap_matcher exhaustive --run_colmap --aabb_scale 128 --overwrite --images  D:\ninwang\DiffusionCLIP\runs\ue_school_all_CD_IMAGENET_ue_school_all_nit1_t301_ninv20_ngen20\diff_samples_orig_binary_11_96
